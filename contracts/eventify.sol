@@ -1,10 +1,11 @@
 //SPDX-License-Identifier: MIT
-pragma solidity ^0.8.6;
+pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155URIStorage.sol";
-import "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+import "./IEventify.sol";
+
 
 library structTicket { 
     struct Ticket {
@@ -12,27 +13,18 @@ library structTicket {
         uint remaining;
         uint price;
         address owner;
-        uint256 tokenId;
-        bool status;
+        uint256 ticketId;
+        bool status; //indicates paused/active event
+        bool isPublished;
     }
 }
 
-contract Eventify is ERC1155URIStorage, ERC1155Holder {
+contract Eventify is IEventify, ERC1155URIStorage, ERC1155Holder {
     address public host;
 
-    // contract deployer is called host
+    // host is a contract deployer
     constructor() ERC1155("") {
         host = payable(tx.origin);
-    }
-
-    function supportsInterface(bytes4 interfaceId)
-        public
-        view
-        virtual
-        override(ERC1155, ERC1155Receiver)
-        returns (bool)
-    {
-        return super.supportsInterface(interfaceId);
     }
 
     using Counters for Counters.Counter;
@@ -45,21 +37,32 @@ contract Eventify is ERC1155URIStorage, ERC1155Holder {
         _;
     }
 
-    // mints erc1155 Nft collection and sends to currrent contract
-    function hostEvent(uint _price, uint _supply, string memory _tokenURI) public payable onlyHost {
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC1155, ERC1155Receiver) returns (bool) {
+        return super.supportsInterface(interfaceId);
+    }
+
+    // mints erc1155 Nft collection
+    function mintTickets(uint _price, uint _supply, string memory _tokenURI) public payable onlyHost {
         _tokenId.increment();
         uint256 currentToken = _tokenId.current();
         _mint(host, currentToken, _supply, "");
-        _safeTransferFrom(host, address(this), currentToken, _supply, "");
         _setURI(currentToken, _tokenURI);
-        idToTicket[currentToken] = structTicket.Ticket(_supply, _supply, _price, host, currentToken, true);
+        idToTicket[currentToken] = structTicket.Ticket(_supply, _supply, _price, host, currentToken, false, false);
     }
 
-    function pauseActiveEvents(uint256 _ticketId) public payable onlyHost {
+    // publishes NFT collection as event tickets
+    function publishTickets(uint256 _ticketId) public payable onlyHost {
+        _safeTransferFrom(host, address(this), _ticketId, idToTicket[_ticketId].supply, "");
+        idToTicket[_ticketId].status = true;
+        idToTicket[_ticketId].isPublished = true;
+    }
+    // pauses an active event
+    function pauseActiveEvent(uint256 _ticketId) public payable onlyHost {
         idToTicket[_ticketId].status = false;
     }
 
-    function playActiveEvents(uint256 _ticketId) public payable onlyHost {
+    // runs a paused event
+    function runPausedEvent(uint256 _ticketId) public payable onlyHost {
         idToTicket[_ticketId].status = true;
     }
 
@@ -72,65 +75,114 @@ contract Eventify is ERC1155URIStorage, ERC1155Holder {
         ticket.owner = payable(tx.origin);
         ticket.remaining--;
         payable(host).transfer(ticket.price);
+        emit Purchased(_ticketId, msg.sender);
     }
 
-    // returns all purchased Nfts
-    function inventory() public view returns (structTicket.Ticket[] memory) {
+    // returns minted but not published nft collections
+    function fetchMintedTickets() public view returns (structTicket.Ticket[] memory) {
         uint256 counter = 0;
         uint256 length;
 
         for (uint256 i = 0; i < _tokenId.current(); i++) {
-            if (idToTicket[i + 1].owner == tx.origin) {
+            if (idToTicket[i + 1].isPublished == false) {
                 length++;
             }
         }
 
-        structTicket.Ticket[] memory myTickets = new structTicket.Ticket[](length);
+        structTicket.Ticket[] memory tickets = new structTicket.Ticket[](length);
         for (uint256 i = 0; i < _tokenId.current(); i++) {
-            if (idToTicket[i + 1].owner == tx.origin) {
+            if (idToTicket[i + 1].isPublished == false) {
                 uint256 currentId = i + 1;
                 structTicket.Ticket storage currentItem = idToTicket[currentId];
-                myTickets[counter] = currentItem;
+                tickets[counter] = currentItem;
                 counter++;
             }
         }
-        return myTickets;
+        return tickets;
     }
 
-    // returns all remaining Nft collections
-    function activeEvents() public view returns (structTicket.Ticket[] memory) {
+    // returns published and active tickets collections
+    function fetchActiveEvents() public view returns (structTicket.Ticket[] memory) {
         uint256 counter = 0;
         uint256 length;
 
         for (uint256 i = 0; i < _tokenId.current(); i++) {
-            if (idToTicket[i + 1].remaining > 0 && idToTicket[i + 1].status == true) {
+            if (idToTicket[i + 1].remaining > 0 && idToTicket[i + 1].status == true && idToTicket[i + 1].isPublished == true) {
                 length++;
             }
         }
 
-        structTicket.Ticket[] memory unsoldTickets = new structTicket.Ticket[](length);
+        structTicket.Ticket[] memory tickets = new structTicket.Ticket[](length);
         for (uint256 i = 0; i < _tokenId.current(); i++) {
-            if (idToTicket[i + 1].remaining > 0 && idToTicket[i + 1].status == true) {
+            if (idToTicket[i + 1].remaining > 0 && idToTicket[i + 1].status == true && idToTicket[i + 1].isPublished == true) {
                 uint256 currentId = i + 1;
                 structTicket.Ticket storage currentItem = idToTicket[currentId];
-                unsoldTickets[counter] = currentItem;
+                tickets[counter] = currentItem;
                 counter++;
             }
         }
-        return unsoldTickets;
+        return tickets;
+    }
+
+    // returns published and paused tickets collections
+    function fetchPausedEvents() public view returns (structTicket.Ticket[] memory) {
+        uint256 counter = 0;
+        uint256 length;
+
+        for (uint256 i = 0; i < _tokenId.current(); i++) {
+            if (idToTicket[i + 1].remaining > 0 && idToTicket[i + 1].status == false && idToTicket[i + 1].isPublished == true) {
+                length++;
+            }
+        }
+
+        structTicket.Ticket[] memory tickets = new structTicket.Ticket[](length);
+        for (uint256 i = 0; i < _tokenId.current(); i++) {
+            if (idToTicket[i + 1].remaining > 0 && idToTicket[i + 1].status == false && idToTicket[i + 1].isPublished == true) {
+                uint256 currentId = i + 1;
+                structTicket.Ticket storage currentItem = idToTicket[currentId];
+                tickets[counter] = currentItem;
+                counter++;
+            }
+        }
+        return tickets;
     }
     
     // returns all published Nft collections by deployer
-    function hostedEvents() public view returns (structTicket.Ticket[] memory) {
+    function fetchAllEvents() public view returns (structTicket.Ticket[] memory) {
         uint256 counter = 0;
 
-        structTicket.Ticket[] memory myTickets = new structTicket.Ticket[](_tokenId.current());
+        structTicket.Ticket[] memory tickets = new structTicket.Ticket[](_tokenId.current());
         for (uint256 i = 0; i < _tokenId.current(); i++) {
+            if(idToTicket[i + 1].isPublished == true){
                 uint256 currentId = i + 1;
                 structTicket.Ticket storage currentItem = idToTicket[currentId];
-                myTickets[counter] = currentItem;
+                tickets[counter] = currentItem;
                 counter++;
+            }
         }
-        return myTickets;
+        return tickets;
+    }
+
+    // returns all purchased Nfts of a user
+    function fetchPurchasedTickets() public view returns (structTicket.Ticket[] memory) {
+        uint256 counter = 0;
+        uint256 length;
+
+        for (uint256 i = 0; i < _tokenId.current(); i++) {
+            if (idToTicket[i + 1].owner == tx.origin) {
+                length++;
+            }
+        }
+
+        structTicket.Ticket[] memory tickets = new structTicket.Ticket[](length);
+        for (uint256 i = 0; i < _tokenId.current(); i++) {
+            if (idToTicket[i + 1].owner == tx.origin) {
+                uint256 currentId = i + 1;
+                structTicket.Ticket storage currentItem = idToTicket[currentId];
+                tickets[counter] = currentItem;
+                counter++;
+            }
+        }
+        return tickets;
     }
 }
